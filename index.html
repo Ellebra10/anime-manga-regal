@@ -444,7 +444,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     <button type="button" class="text-btn" id="backup-save">Backup speichern</button>
     <button type="button" class="text-btn" id="backup-load">Backup laden</button>
     <input type="file" id="backup-file" accept="application/json,.json" hidden>
-    <p class="credit">Deine Einträge liegen nur auf diesem Gerät. Titeldaten: Jikan API (MyAnimeList).</p>
+    <p class="credit">Deine Einträge liegen nur auf diesem Gerät. Titeldaten: AniList und Jikan (MyAnimeList). Version 2.</p>
   </div></main>
 </div>
 
@@ -2049,21 +2049,56 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     $('#f-find').value = '';
     finder.last = '';
     clearHits();
-    finderState('Übernommen von MyAnimeList. Bei laufenden Serien gibt es oft noch keine Gesamtzahl.');
+    finderState('Übernommen. Bei laufenden Serien gibt es oft noch keine Gesamtzahl.');
     $('#f-progress').focus({ preventScroll: true });
   }
   var GENRE_DE = { Adventure: 'Abenteuer', Comedy: 'Komödie', Romance: 'Romanze', Sports: 'Sport', Supernatural: 'Übernatürlich', Suspense: 'Thriller',
     School: 'Schule', Military: 'Militär', Historical: 'Historisch', Music: 'Musik', Psychological: 'Psychologisch', Space: 'Weltraum', 'Martial Arts': 'Kampfsport',
-    'Super Power': 'Superkräfte', Mythology: 'Mythologie', Survival: 'Überleben', Gourmet: 'Kochen', Parody: 'Parodie', Vampire: 'Vampire', 'Time Travel': 'Zeitreise' };
+    'Super Power': 'Superkräfte', Mythology: 'Mythologie', 'Mahou Shoujo': 'Magical Girl', Survival: 'Überleben', Gourmet: 'Kochen', Parody: 'Parodie', Vampire: 'Vampire', 'Time Travel': 'Zeitreise' };
   var GENRE_SKIP = { 'Award Winning': true };
-  function jikan(pathAndQuery, signal) {
-    return fetch('https://api.jikan.moe/v4' + pathAndQuery, { signal: signal, headers: { Accept: 'application/json' } }).then(function (r) {
+  function fetchJson(url, opts, signal, ms) {
+    var c = new AbortController(), late = false;
+    var t = setTimeout(function () { late = true; c.abort(); }, ms);
+    function relay() { c.abort(); }
+    if (signal) { if (signal.aborted) c.abort(); else signal.addEventListener('abort', relay); }
+    opts = opts || {};
+    opts.signal = c.signal;
+    function fail() { return { code: signal && signal.aborted ? 'cancelled' : (late ? 'timeout' : 'network') }; }
+    function tidy() { clearTimeout(t); if (signal) signal.removeEventListener('abort', relay); }
+    return fetch(url, opts).then(function (r) {
       if (r.status === 429) throw { code: 'rate_limited' };
       if (!r.ok) throw { code: 'http_' + r.status };
-      return r.json();
-    }, function (e) {
-      throw { code: e && e.name === 'AbortError' ? 'cancelled' : 'network' };
+      return r.json().catch(function () { throw fail(); });
+    }, function () { throw fail(); }).then(function (v) { tidy(); return v; }, function (e) { tidy(); throw e; });
+  }
+  function jikan(pathAndQuery, signal) {
+    return fetchJson('https://api.jikan.moe/v4' + pathAndQuery, { headers: { Accept: 'application/json' } }, signal, 9000);
+  }
+  var AL_FIELDS = 'id idMal type format episodes chapters status isAdult genres startDate{year} title{english romaji}';
+  var AL_FORMAT = { MOVIE: 'Film', OVA: 'OVA', ONA: 'ONA', SPECIAL: 'Special', TV_SHORT: 'Kurzserie', MUSIC: 'Musikvideo', NOVEL: 'Light Novel', ONE_SHOT: 'One-Shot' };
+  function anilist(query, variables, signal) {
+    return fetchJson('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ query: query, variables: variables })
+    }, signal, 5000).then(function (r) {
+      if (!r || !r.data) throw { code: 'bad_answer' };
+      return r.data;
     });
+  }
+  function fromAniList(m) {
+    if (!m || typeof m !== 'object' || m.isAdult || !m.title) return null;
+    var kind = m.type === 'MANGA' ? 'manga' : 'anime';
+    var st = String(m.status || '');
+    var release = st === 'FINISHED' || st === 'CANCELLED' ? 'finished' : st === 'NOT_YET_RELEASED' ? 'upcoming' : st ? 'ongoing' : '';
+    var names = (Array.isArray(m.genres) ? m.genres : []).filter(function (n) { return typeof n === 'string'; })
+      .map(function (n) { return Object.prototype.hasOwnProperty.call(GENRE_DE, n) ? GENRE_DE[n] : n; });
+    var hit = cleanHit({ title: m.title.english || m.title.romaji, kind: kind, total: kind === 'anime' ? m.episodes : m.chapters, release: release, year: m.startDate && m.startDate.year, genres: names });
+    if (!hit) return null;
+    hit.malId = typeof m.idMal === 'number' ? m.idMal : null;
+    hit.type = Object.prototype.hasOwnProperty.call(AL_FORMAT, m.format) ? AL_FORMAT[m.format] : '';
+    hit.full = true;
+    return hit;
   }
   function fromJikan(x, kind) {
     if (!x || typeof x !== 'object') return null;
@@ -2081,6 +2116,26 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     hit.type = typeof x.type === 'string' && ['TV', 'Manga'].indexOf(x.type) < 0 ? x.type.slice(0, 20) : '';
     return hit;
   }
+  function searchAniList(q, signal) {
+    return anilist('query($q:String){Page(perPage:6){media(search:$q,isAdult:false,sort:SEARCH_MATCH){' + AL_FIELDS + '}}}', { q: q }, signal).then(function (d) {
+      return (d.Page && Array.isArray(d.Page.media) ? d.Page.media : []).map(fromAniList).filter(Boolean);
+    });
+  }
+  function searchJikan(q, signal) {
+    var failedCount = 0, lastErr = null;
+    function one(kind) {
+      return jikan('/' + kind + '?q=' + encodeURIComponent(q) + '&limit=4&sfw=true', signal).then(function (r) {
+        return (r && Array.isArray(r.data) ? r.data : []).map(function (x) { return fromJikan(x, kind); }).filter(Boolean);
+      }).catch(function (e) { failedCount++; lastErr = e; return []; });
+    }
+    return Promise.all([one('anime'), one('manga')]).then(function (r) {
+      if (failedCount === 2) throw lastErr || { code: 'network' };
+      var hits = [];
+      for (var i = 0; i < 4; i++) { if (r[0][i]) hits.push(r[0][i]); if (r[1][i]) hits.push(r[1][i]); }
+      return hits;
+    });
+  }
+  var NET_DOWN = 'Die Titel-Datenbank ist gerade nicht erreichbar. Vielleicht blockiert dein Netzwerk sie, zum Beispiel ein Schul-WLAN. Trag den Titel selbst unten ein oder versuch es später nochmal.';
   function lookup(raw) {
     var q = oneLine(raw, 80);
     if (q.length < 3 || q === finder.last) return;
@@ -2089,22 +2144,12 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     var ctl = finder.ctl = new AbortController();
     clearHits();
     finderState('Sucht „' + q + '“ …');
-    var failedCount = 0, lastErr = null;
-    function one(kind) {
-      return jikan('/' + kind + '?q=' + encodeURIComponent(q) + '&limit=4&sfw=true', ctl.signal).then(function (r) {
-        return (r && Array.isArray(r.data) ? r.data : []).map(function (x) { return fromJikan(x, kind); }).filter(Boolean);
-      }).catch(function (e) { failedCount++; lastErr = e; return []; });
-    }
-    Promise.all([one('anime'), one('manga')]).then(function (r) {
+    searchAniList(q, ctl.signal).catch(function (e) {
+      if (e && e.code === 'cancelled') throw e;
+      return searchJikan(q, ctl.signal);
+    }).then(function (hits) {
       if (finder.ctl !== ctl) return;
       finder.ctl = null;
-      if (failedCount === 2) {
-        finder.last = '';
-        finderState(lastErr && lastErr.code === 'cancelled' ? '' : sampleMessage(lastErr, 'Die Suche braucht Internet und hat gerade nicht geklappt. Trag den Titel einfach selbst unten ein.'));
-        return;
-      }
-      var hits = [];
-      for (var i = 0; i < 4; i++) { if (r[0][i]) hits.push(r[0][i]); if (r[1][i]) hits.push(r[1][i]); }
       hits = hits.slice(0, 6);
       if (!hits.length) { finderState('Nichts gefunden. Trag den Titel einfach selbst unten ein.'); return; }
       finderState('');
@@ -2113,6 +2158,11 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
           h('b', null, hit.title), h('span', null, factLine(hit, true) + (hit.type ? ' · ' + hit.type : ''))));
       }));
       $('#hits').hidden = false;
+    }).catch(function (err) {
+      if (finder.ctl !== ctl) return;
+      finder.ctl = null;
+      finder.last = '';
+      finderState(err && err.code === 'cancelled' ? '' : sampleMessage(err, NET_DOWN));
     });
   }
   $('#f-find').addEventListener('input', function (ev) {
@@ -2175,6 +2225,29 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     focusTip();
   }
   var tipRound = 0, keeping = false;
+  function recsAniList(seed, signal) {
+    return anilist('query($q:String,$t:MediaType){Media(search:$q,type:$t){recommendations(sort:RATING_DESC,perPage:15){nodes{mediaRecommendation{' + AL_FIELDS + '}}}}}',
+      { q: oneLine(seed.title, 80), t: seed.kind === 'manga' ? 'MANGA' : 'ANIME' }, signal).then(function (d) {
+      var nodes = d.Media && d.Media.recommendations && Array.isArray(d.Media.recommendations.nodes) ? d.Media.recommendations.nodes : [];
+      return nodes.map(function (n) { return fromAniList(n && n.mediaRecommendation); }).filter(Boolean);
+    });
+  }
+  function recsJikan(seed, signal) {
+    return (seed.malId ? Promise.resolve(seed.malId) : jikan('/' + seed.kind + '?q=' + encodeURIComponent(oneLine(seed.title, 80)) + '&limit=1', signal).then(function (r) {
+      return r && Array.isArray(r.data) && r.data[0] && typeof r.data[0].mal_id === 'number' ? r.data[0].mal_id : null;
+    })).then(function (id) {
+      if (!id) return { data: [] };
+      return jikan('/' + seed.kind + '/' + id + '/recommendations', signal);
+    }).then(function (res) {
+      return (res && Array.isArray(res.data) ? res.data : []).map(function (x) {
+        var en = x && x.entry;
+        if (!en || typeof en.title !== 'string') return null;
+        var r = cleanHit({ title: en.title, kind: seed.kind });
+        if (r) r.malId = typeof en.mal_id === 'number' ? en.mal_id : null;
+        return r;
+      }).filter(Boolean);
+    });
+  }
   function askTip() {
     var items = list(), favs = favourites(items);
     if (!favs.length || tip.state === 'busy') return;
@@ -2188,23 +2261,19 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     tip.ver++;
     render();
     focusTip();
-    (seed.malId ? Promise.resolve(seed.malId) : jikan('/' + seed.kind + '?q=' + encodeURIComponent(oneLine(seed.title, 80)) + '&limit=1', ctl.signal).then(function (r) {
-      return r && Array.isArray(r.data) && r.data[0] && typeof r.data[0].mal_id === 'number' ? r.data[0].mal_id : null;
-    })).then(function (id) {
-      if (!id) return { data: [] };
-      return jikan('/' + seed.kind + '/' + id + '/recommendations', ctl.signal);
-    }).then(function (res) {
+    recsAniList(seed, ctl.signal).catch(function (e) {
+      if (e && e.code === 'cancelled') throw e;
+      return recsJikan(seed, ctl.signal);
+    }).then(function (found) {
       if (tip.ctl !== ctl) return;
       tip.ctl = null;
       var known = Object.create(null), recs = [];
       list().forEach(function (e) { known[fold(e.title)] = true; });
       earlier.forEach(function (t) { known[fold(t)] = true; });
-      (res && Array.isArray(res.data) ? res.data : []).forEach(function (x) {
-        var en = x && x.entry;
-        if (recs.length >= 3 || !en || typeof en.title !== 'string' || !en.title.trim() || known[fold(en.title)]) return;
-        known[fold(en.title)] = true;
-        var r = cleanHit({ title: en.title, kind: seed.kind, reason: 'Fans von „' + seed.title + '“ mögen auch diesen Titel.' });
-        r.malId = typeof en.mal_id === 'number' ? en.mal_id : null;
+      found.forEach(function (r) {
+        if (recs.length >= 3 || known[fold(r.title)]) return;
+        known[fold(r.title)] = true;
+        r.reason = 'Fans von „' + seed.title + '“ mögen auch diesen Titel.';
         recs.push(r);
       });
       if (recs.length) { tip.recs = recs; tip.state = 'done'; }
@@ -2216,7 +2285,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
       if (tip.ctl !== ctl) return;
       tip.ctl = null;
       if (err && err.code === 'cancelled') tip.state = tip.recs.length ? 'done' : 'idle';
-      else { tip.state = 'error'; tip.msg = sampleMessage(err, 'Die Vorschläge brauchen Internet und konnten gerade nicht geladen werden. Versuch es nochmal.'); }
+      else { tip.state = 'error'; tip.msg = sampleMessage(err, NET_DOWN); }
       tip.ver++;
       render();
       focusTip();
@@ -2225,7 +2294,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
   /* "Merken": fetch the facts of a suggestion first, so the entry is filled in. */
   function keepRec(r) {
     if (keeping) return;
-    if (!r.malId) { openSheet(null, r); return; }
+    if (r.full || !r.malId) { openSheet(null, r); return; }
     keeping = true;
     jikan('/' + r.kind + '/' + r.malId).then(function (res) {
       var hit = fromJikan(res && res.data, r.kind);
@@ -2286,7 +2355,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     } else {
       if (tip.state === 'error') kids.push(h('p', { class: 'err tip-err', role: 'alert' }, tip.msg));
       if (tip.recs.length) {
-        kids.push(h('p', { class: 'recs-label' }, 'Vorschläge von MyAnimeList'),
+        kids.push(h('p', { class: 'recs-label' }, 'Vorschläge für dich'),
           h('ul', { class: 'recs' }, tip.recs.map(function (r) {
             return h('li', { class: 'rec' },
               h('b', null, r.title),

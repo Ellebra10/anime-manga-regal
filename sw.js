@@ -1,5 +1,5 @@
-// Keeps the app usable without internet: serve the saved copy, refresh it in the background.
-const CACHE = 'regal-v1';
+// Keeps the app usable without internet: load the newest version when online, the saved copy when offline.
+const CACHE = 'regal-v2';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => {
@@ -8,8 +8,6 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
-  e.respondWith(caches.open(CACHE).then((cache) => cache.match(e.request, { ignoreSearch: true }).then((hit) => {
-    const fresh = fetch(e.request).then((res) => { if (res.ok) cache.put(e.request, res.clone()); return res; }).catch(() => hit);
-    return hit || fresh;
-  })));
+  e.respondWith(caches.open(CACHE).then((cache) => fetch(e.request).then((res) => { if (res.ok) cache.put(e.request, res.clone()); return res; })
+    .catch(() => cache.match(e.request, { ignoreSearch: true }))));
 });
