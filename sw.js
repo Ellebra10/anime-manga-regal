@@ -1,5 +1,5 @@
 // Keeps the app usable without internet: load the newest version when online, the saved copy when offline.
-const CACHE = 'regal-v2';
+const CACHE = 'regal-v3';
 const FILES = ['./', 'index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(FILES)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => {

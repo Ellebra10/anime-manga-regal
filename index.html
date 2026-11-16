@@ -352,6 +352,10 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
 .foot{display:flex;flex-wrap:wrap;align-items:center;gap:4px 18px;margin-top:36px;color:var(--muted);font-size:12.5px;line-height:1.4}
 .foot .text-btn{min-height:40px;color:var(--muted);text-decoration:underline}
 .credit{flex:1 0 100%}
+.hit{grid-template-columns:44px minmax(0,1fr);align-items:center;column-gap:11px}
+.hit-img{grid-column:1;grid-row:1 / span 2;display:block;width:44px;aspect-ratio:5/7;object-fit:cover;border-radius:6px;background:var(--surface-2)}
+.hit b{grid-column:2;align-self:end}
+.hit span{grid-column:2;align-self:start}
 
 /* PIN */
 #pin{width:min(340px,calc(100% - 32px));margin:auto;padding:0;border:0;border-radius:24px;background:var(--surface);color:var(--text);box-shadow:0 40px 90px -20px rgba(0,0,0,.85),inset 0 0 0 1px var(--hair)}
@@ -444,7 +448,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     <button type="button" class="text-btn" id="backup-save">Backup speichern</button>
     <button type="button" class="text-btn" id="backup-load">Backup laden</button>
     <input type="file" id="backup-file" accept="application/json,.json" hidden>
-    <p class="credit">Deine Einträge liegen nur auf diesem Gerät. Titeldaten: AniList und Jikan (MyAnimeList). Version 2.</p>
+    <p class="credit">Deine Einträge liegen nur auf diesem Gerät. Titeldaten: AniList und Jikan (MyAnimeList). Version 3.</p>
   </div></main>
 </div>
 
@@ -471,7 +475,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
             <input type="file" id="f-image" class="sr-only" accept="image/*">
             <label class="btn" id="pick-label" for="f-image">Bild hochladen</label>
             <button type="button" class="link-btn" id="pick-clear" hidden>Bild entfernen</button>
-            <p class="hint" id="pick-hint">Damit du den Titel sofort erkennst. <span class="hint-fine">Du kannst ein Bild auch hineinziehen oder mit Strg+V einfügen.</span></p>
+            <p class="hint" id="pick-hint">Die Suche bringt das Cover mit. Du kannst auch ein eigenes Bild nehmen. <span class="hint-fine">Du kannst ein Bild auch hineinziehen oder mit Strg+V einfügen.</span></p>
             <p class="err" id="pick-err" role="alert" hidden></p>
           </div>
         </div>
@@ -667,7 +671,13 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function hash(s) { var x = 5381; for (var i = 0; i < s.length; i++) x = ((x * 33) ^ s.charCodeAt(i)) >>> 0; return x; }
   function byTitle(a, b) { return a.title.localeCompare(b.title, 'de', { numeric: true, sensitivity: 'base' }); }
-  function blobUrl(id) { return Local.url(id); }
+  function isCoverUrl(v) { return typeof v === 'string' && /^https:\/\/[a-z0-9.-]+\/[^\s"'<>]{1,400}$/i.test(v); }
+  function jikanImage(x) {
+    var im = x && x.images && (x.images.jpg || x.images.webp);
+    var u = im && (im.large_image_url || im.image_url);
+    return isCoverUrl(u) ? u : null;
+  }
+  function blobUrl(id) { return isCoverUrl(id) ? id : Local.url(id); }
   function store(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
   function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
   function withRetry(fn, code) {
@@ -893,7 +903,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
       genres: cleanGenres(d.genres),
       malId: typeof d.malId === 'number' && isFinite(d.malId) ? d.malId : null,
       release: RELEASES.indexOf(d.release) >= 0 ? d.release : '',
-      imageId: typeof d.imageId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(d.imageId) ? d.imageId : null,
+      imageId: typeof d.imageId === 'string' && (/^[A-Za-z0-9_-]{8,64}$/.test(d.imageId) || isCoverUrl(d.imageId)) ? d.imageId : null,
       example: d.example === true,
       createdAt: typeof d.createdAt === 'string' ? d.createdAt : '',
       updatedAt: typeof d.updatedAt === 'string' ? d.updatedAt : (typeof d.createdAt === 'string' ? d.createdAt : '')
@@ -1698,7 +1708,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     editing = e;
     dirty = false;
     clearPreview();
-    draft.imageId = e ? e.imageId : null;
+    draft.imageId = e ? e.imageId : (preset && preset.image ? preset.image : null);
     draft.ref = null;
     draft.refSpace = null;
     form.reset();
@@ -2041,15 +2051,16 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     $('#f-genres').value = hit.genres.join(', ');
     setRelease(hit.release);
     draft.malId = hit.malId || null;
+    if (hit.image && !draft.blob && (!draft.imageId || isCoverUrl(draft.imageId))) draft.imageId = hit.image;
     dirty = true;
     syncLabels();
     showErr('#title-err', false);
     showErr('#form-err', false);
-    if (!draft.preview && !draft.imageId) syncPreview();
+    syncPreview();
     $('#f-find').value = '';
     finder.last = '';
     clearHits();
-    finderState('Übernommen. Bei laufenden Serien gibt es oft noch keine Gesamtzahl.');
+    finderState('Übernommen, mit Cover. Du kannst auch ein eigenes Bild hochladen.');
     $('#f-progress').focus({ preventScroll: true });
   }
   var GENRE_DE = { Adventure: 'Abenteuer', Comedy: 'Komödie', Romance: 'Romanze', Sports: 'Sport', Supernatural: 'Übernatürlich', Suspense: 'Thriller',
@@ -2074,7 +2085,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
   function jikan(pathAndQuery, signal) {
     return fetchJson('https://api.jikan.moe/v4' + pathAndQuery, { headers: { Accept: 'application/json' } }, signal, 9000);
   }
-  var AL_FIELDS = 'id idMal type format episodes chapters status isAdult genres startDate{year} title{english romaji}';
+  var AL_FIELDS = 'id idMal type format episodes chapters status isAdult genres startDate{year} title{english romaji} coverImage{large}';
   var AL_FORMAT = { MOVIE: 'Film', OVA: 'OVA', ONA: 'ONA', SPECIAL: 'Special', TV_SHORT: 'Kurzserie', MUSIC: 'Musikvideo', NOVEL: 'Light Novel', ONE_SHOT: 'One-Shot' };
   function anilist(query, variables, signal) {
     return fetchJson('https://graphql.anilist.co', {
@@ -2098,6 +2109,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     hit.malId = typeof m.idMal === 'number' ? m.idMal : null;
     hit.type = Object.prototype.hasOwnProperty.call(AL_FORMAT, m.format) ? AL_FORMAT[m.format] : '';
     hit.full = true;
+    hit.image = m.coverImage && isCoverUrl(m.coverImage.large) ? m.coverImage.large : null;
     return hit;
   }
   function fromJikan(x, kind) {
@@ -2114,6 +2126,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
     if (!hit) return null;
     hit.malId = typeof x.mal_id === 'number' ? x.mal_id : null;
     hit.type = typeof x.type === 'string' && ['TV', 'Manga'].indexOf(x.type) < 0 ? x.type.slice(0, 20) : '';
+    hit.image = jikanImage(x);
     return hit;
   }
   function searchAniList(q, signal) {
@@ -2155,6 +2168,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
       finderState('');
       $('#hits').replaceChildren.apply($('#hits'), hits.map(function (hit) {
         return h('li', null, h('button', { class: 'hit', type: 'button', onclick: function () { applyHit(hit); } },
+          hit.image ? h('img', { class: 'hit-img', src: hit.image, alt: '', loading: 'lazy' }) : h('i', { class: 'hit-img' }),
           h('b', null, hit.title), h('span', null, factLine(hit, true) + (hit.type ? ' · ' + hit.type : ''))));
       }));
       $('#hits').hidden = false;
@@ -2243,7 +2257,7 @@ h1{font:700 clamp(24px,6.6vw,34px)/1.1 var(--display);letter-spacing:-.015em}
         var en = x && x.entry;
         if (!en || typeof en.title !== 'string') return null;
         var r = cleanHit({ title: en.title, kind: seed.kind });
-        if (r) r.malId = typeof en.mal_id === 'number' ? en.mal_id : null;
+        if (r) { r.malId = typeof en.mal_id === 'number' ? en.mal_id : null; r.image = jikanImage(en); }
         return r;
       }).filter(Boolean);
     });
